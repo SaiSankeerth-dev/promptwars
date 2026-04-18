@@ -1,12 +1,15 @@
 import os
 import json
 import asyncio
+import logging
 from datetime import datetime
 from typing import Dict, List
 from fastapi import FastAPI
 import redis
 
 app = FastAPI(title="Digital Twin Engine", version="1.0.0")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
+logger = logging.getLogger("ssos.digital_twin")
 
 redis_client = redis.Redis(
     host=os.getenv("REDIS_HOST", "localhost"),
@@ -151,6 +154,7 @@ async def simulation_loop():
 async def startup():
     asyncio.create_task(simulation_loop())
     redis_client.set("digital_twin:status", "running")
+    logger.info("Digital twin started with %s agents", len(digital_twin.agents))
 
 @app.get("/")
 async def root():

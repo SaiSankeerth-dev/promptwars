@@ -3,6 +3,7 @@ import json
 import asyncio
 import threading
 import time
+import logging
 from datetime import datetime
 from typing import Dict, List
 from fastapi import FastAPI
@@ -12,6 +13,8 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, 
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 app = FastAPI(title="Data Pipeline", version="1.0.0")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
+logger = logging.getLogger("ssos.data_pipeline")
 
 redis_client = redis.Redis(
     host=os.getenv("REDIS_HOST", "localhost"),
@@ -83,7 +86,7 @@ class DataPipeline:
                 return
             except Exception as e:
                 self.stats["errors"] += 1
-                print(f"[pipeline] database init failed: {e} — retrying in 5s")
+                logger.warning("Database init failed: %s; retrying in 5s", e)
                 await asyncio.sleep(5)
         
     def consume_crowd_observations(self):
@@ -117,7 +120,7 @@ class DataPipeline:
                         
             except Exception as e:
                 self.stats["errors"] += 1
-                print(f"[pipeline] crowd consumer error: {e} — retrying in 5s")
+                logger.warning("Crowd consumer error: %s; retrying in 5s", e)
                 time.sleep(5)
                 
     def consume_location_updates(self):
@@ -153,7 +156,7 @@ class DataPipeline:
                         
             except Exception as e:
                 self.stats["errors"] += 1
-                print(f"[pipeline] location consumer error: {e} — retrying in 5s")
+                logger.warning("Location consumer error: %s; retrying in 5s", e)
                 time.sleep(5)
                 
     def consume_food_orders(self):
@@ -190,7 +193,7 @@ class DataPipeline:
                         
             except Exception as e:
                 self.stats["errors"] += 1
-                print(f"[pipeline] order consumer error: {e} — retrying in 5s")
+                logger.warning("Order consumer error: %s; retrying in 5s", e)
                 time.sleep(5)
                 
     def consume_emergency_alerts(self):
@@ -227,7 +230,7 @@ class DataPipeline:
                         
             except Exception as e:
                 self.stats["errors"] += 1
-                print(f"[pipeline] alert consumer error: {e} — retrying in 5s")
+                logger.warning("Alert consumer error: %s; retrying in 5s", e)
                 time.sleep(5)
                 
     async def start(self):
@@ -247,6 +250,7 @@ async def startup():
     await pipeline.initialize_storage()
     await pipeline.start()
     redis_client.set("pipeline:status", "running")
+    logger.info("Data pipeline started")
 
 @app.on_event("shutdown")
 async def shutdown():

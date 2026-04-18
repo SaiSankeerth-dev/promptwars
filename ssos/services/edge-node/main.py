@@ -2,6 +2,7 @@ import os
 import json
 import time
 import threading
+import logging
 import redis
 import numpy as np
 from datetime import datetime
@@ -9,6 +10,8 @@ from typing import Dict, List
 from kafka import KafkaProducer
 
 app_host = os.getenv("KAFKA_BROKERS", "localhost:29092").split(",")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
+logger = logging.getLogger("ssos.edge_node")
 
 redis_client = redis.Redis(
     host=os.getenv("REDIS_HOST", "localhost"),
@@ -30,9 +33,9 @@ class EdgeNodeSimulator:
                 value_serializer=lambda v: json.dumps(v).encode('utf-8'),
                 acks='all'
             )
-            print(f"[{self.node_id}] Connected to Kafka")
+            logger.info("[%s] Connected to Kafka", self.node_id)
         except Exception as e:
-            print(f"[{self.node_id}] Kafka connection failed: {e}")
+            logger.warning("[%s] Kafka connection failed: %s", self.node_id, e)
             
     def _fetch_from_redis(self, zone_id: str) -> Dict:
         """Fetch real density/velocity from Redis crowd-prediction service."""
@@ -105,7 +108,7 @@ class EdgeNodeSimulator:
         self.connect_kafka()
         self.running = True
         
-        print(f"[{self.node_id}] Edge node started for zones: {self.zone_ids}")
+        logger.info("[%s] Edge node started for zones: %s", self.node_id, self.zone_ids)
         
         iteration = 0
         while self.running:
@@ -121,11 +124,11 @@ class EdgeNodeSimulator:
                         self.producer.send('ble_devices', ble_data)
                         self.producer.flush()
                     except Exception as e:
-                        print(f"[{self.node_id}] Send error: {e}")
+                        logger.warning("[%s] Send error: %s", self.node_id, e)
                         
             iteration += 1
             if iteration % 10 == 0:
-                print(f"[{self.node_id}] Sent data for {len(self.zone_ids)} zones ({iteration} cycles)")
+                logger.info("[%s] Sent data for %s zones (%s cycles)", self.node_id, len(self.zone_ids), iteration)
                 
             time.sleep(3)
             
@@ -173,10 +176,7 @@ class DataAnonymizer:
     def _hash_id(self, original_id: str) -> str:
         return f"anon_{hash(original_id) % 100000}"
 
-print("=" * 50)
-print("SSOS Edge Node - Reading Real Data from Redis")
-print("=" * 50)
-print()
+logger.info("SSOS Edge Node - Reading Real Data from Redis")
 
 edge_nodes = [
     EdgeNodeSimulator("edge_node_1", ["gate_a", "gate_b", "concourse_a"]),
@@ -195,7 +195,7 @@ try:
     while True:
         time.sleep(1)
 except KeyboardInterrupt:
-    print("\n[edge-node] Stopping all simulators...")
+    logger.info("Stopping all edge simulators")
 finally:
     for node in edge_nodes:
         node.stop()

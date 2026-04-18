@@ -1,7 +1,7 @@
 import os
 import json
-import time
 import heapq
+import logging
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
@@ -9,6 +9,8 @@ from fastapi import FastAPI
 import redis
 
 app = FastAPI(title="Smart Routing Engine", version="1.0.0")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
+logger = logging.getLogger("ssos.routing_engine")
 
 redis_client = redis.Redis(
     host=os.getenv("REDIS_HOST", "localhost"),
@@ -296,6 +298,7 @@ async def startup():
                    else "stand" if "stand" in node else "exit" if "exit" in node 
                    else "facility"
         }))
+    logger.info("Routing engine initialized with %s nodes", len(routing_engine.graph.nodes))
 
 @app.get("/")
 async def root():

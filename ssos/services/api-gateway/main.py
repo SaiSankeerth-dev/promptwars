@@ -5,6 +5,7 @@ from typing import Optional, List, Set
 from datetime import datetime, UTC
 from urllib.parse import urlencode
 from urllib.request import urlopen
+import logging
 import redis
 import redis.asyncio as aioredis
 from kafka import KafkaProducer
@@ -13,6 +14,8 @@ import os
 import asyncio
 
 app = FastAPI(title="SSOS API Gateway", version="2.0.0")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
+logger = logging.getLogger("ssos.api_gateway")
 
 # Active WebSocket connections
 _ws_clients: Set[WebSocket] = set()
@@ -46,10 +49,10 @@ def _init_kafka_producer():
             bootstrap_servers=KAFKA_BROKERS,
             value_serializer=lambda value: json.dumps(value).encode("utf-8"),
         )
-        print("[gateway] Kafka producer connected")
+        logger.info("Kafka producer connected")
     except Exception as exc:
         kafka_producer = None
-        print(f"[gateway] Kafka producer unavailable: {exc}")
+        logger.warning("Kafka producer unavailable: %s", exc)
 
 def _emit_event(redis_channel: str, payload: dict, kafka_topic: str | None = None):
     message = json.dumps(payload)
@@ -58,7 +61,7 @@ def _emit_event(redis_channel: str, payload: dict, kafka_topic: str | None = Non
         try:
             kafka_producer.send(kafka_topic, payload)
         except Exception as exc:
-            print(f"[gateway] Kafka publish failed for {kafka_topic}: {exc}")
+            logger.warning("Kafka publish failed for %s: %s", kafka_topic, exc)
 
 def _fetch_json(url: str) -> dict:
     with urlopen(url, timeout=5) as response:
@@ -129,7 +132,7 @@ class FoodOrder(BaseModel):
 async def startup():
     _init_kafka_producer()
     asyncio.create_task(_redis_pubsub_broadcaster())
-    print("[gateway] WebSocket broadcaster started")
+    logger.info("WebSocket broadcaster started")
 
 
 @app.websocket("/ws/dashboard")

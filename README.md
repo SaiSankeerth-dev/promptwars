@@ -81,6 +81,28 @@ python train_checkpoint.py
 Open `dashboard/public/index.html` in your browser.
 The dashboard auto-connects via WebSocket (`ws://localhost:8000/ws/dashboard`) and falls back to REST polling if WS is unavailable.
 
+### 4. Canonical Entry Path
+Use `ssos/run.bat` on Windows or `ssos/run.sh` on macOS/Linux for the judged demo path.
+Primary operator UI: `ssos/dashboard/public/index.html`
+
+---
+
+## System Flow
+
+```text
+Edge Node -> Crowd Prediction -> Decision Engine -> Routing Engine -> Dashboard
+          -> Redis/Kafka state -> API Gateway -> Demo Health / User APIs
+          -> Digital Twin -> Dashboard snapshot and readiness checks
+```
+
+Detailed runtime flow:
+- `edge-node` publishes observations for venue zones.
+- `crowd-prediction` updates density, velocity, forecasts, and CrushGuard alerts.
+- `decision-engine` subscribes to CrushGuard alerts and generates operator actions.
+- `routing-engine` serves congestion-aware paths through the gateway.
+- `api-gateway` exposes user APIs, WebSocket fanout, and `/api/v1/demo/health`.
+- `digital-twin` publishes simulated venue state for live dashboard context.
+
 ---
 
 ## 📡 Service Ports

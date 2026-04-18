@@ -1,8 +1,8 @@
 import os
 import json
-import time
 import asyncio
 import numpy as np
+import logging
 from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass
@@ -10,8 +10,11 @@ from enum import Enum
 from fastapi import FastAPI
 import redis
 import redis.asyncio as aioredis
+from pydantic import BaseModel
 
 app = FastAPI(title="Real-Time Decision Engine", version="1.0.0")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
+logger = logging.getLogger("ssos.decision_engine")
 
 redis_client = redis.Redis(
     host=os.getenv("REDIS_HOST", "localhost"),
@@ -43,6 +46,14 @@ class DecisionRule:
     condition: str
     threshold: float
     action: ActionType
+    priority: int
+    cooldown_seconds: int
+
+class DecisionRuleRequest(BaseModel):
+    name: str
+    condition: str
+    threshold: float
+    action: str
     priority: int
     cooldown_seconds: int
 
@@ -127,7 +138,9 @@ class RuleEngine:
                 self.action_history.add(history_key)
                 
                 if rule.cooldown_seconds > 0:
-                    asyncio.create_task(self._reset_rule(history_key, rule.cooldown_seconds))
+                    asyncio.get_running_loop().call_later(
+                        rule.cooldown_seconds, self.action_history.discard, history_key
+                    )
         
         if triggered_rules:
             triggered_rules.sort(key=lambda r: (r["priority"], -r["threshold"]))
@@ -140,10 +153,6 @@ class RuleEngine:
         
         return None
     
-    async def _reset_rule(self, rule_name: str, cooldown: int):
-        await asyncio.sleep(cooldown)
-        self.action_history.discard(rule_name)
-
 class AnomalyDetector:
     def __init__(self):
         self.baseline_metrics = {
@@ -380,7 +389,7 @@ async def crushguard_subscriber_loop():
                 alert = json.loads(message["data"])
                 await decision_engine.process_crushguard_alert(alert)
         except Exception as exc:
-            print(f"[decision-engine] crushguard subscriber error: {exc}")
+            logger.warning("CrushGuard subscriber error: %s", exc)
             await asyncio.sleep(5)
         finally:
             if pubsub is not None:
@@ -393,6 +402,7 @@ async def startup():
     redis_client.set("decision:engine:status", "running")
     redis_client.set("decision:engine:started_at", datetime.utcnow().isoformat())
     asyncio.create_task(crushguard_subscriber_loop())
+    logger.info("Decision engine started")
 
 @app.get("/")
 async def root():
@@ -425,8 +435,17 @@ async def get_rules():
     ]}
 
 @app.post("/api/v1/rules/add")
-async def add_rule(rule: DecisionRule):
-    decision_engine.rule_engine.rules.append(rule)
+async def add_rule(rule: DecisionRuleRequest):
+    decision_engine.rule_engine.rules.append(
+        DecisionRule(
+            name=rule.name,
+            condition=rule.condition,
+            threshold=rule.threshold,
+            action=ActionType(rule.action),
+            priority=rule.priority,
+            cooldown_seconds=rule.cooldown_seconds,
+        )
+    )
     return {"status": "added", "rule": rule.name}
 
 @app.get("/api/v1/anomalies/active")

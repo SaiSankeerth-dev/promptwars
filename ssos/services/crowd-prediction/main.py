@@ -13,6 +13,7 @@ import os
 import json
 import asyncio
 import threading
+import logging
 import numpy as np
 from datetime import datetime
 from typing import Dict, List
@@ -24,6 +25,8 @@ import torch
 from model import CrowdLSTM, load_model, INPUT_FEATURES, SEQ_LEN, FORECAST_HORIZON
 
 app = FastAPI(title="Crowd Density Prediction (LSTM)", version="2.0.0")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
+logger = logging.getLogger("ssos.crowd_prediction")
 
 # ─── Infrastructure ───────────────────────────────────────────────────────────
 
@@ -60,9 +63,9 @@ MODEL_PATH = os.getenv("MODEL_PATH", "crowd_lstm.pt")
 def _load_or_init_model() -> CrowdLSTM:
     """Load pre-trained weights if available, else use random-init model."""
     if os.path.exists(MODEL_PATH):
-        print(f"[model] Loading weights from {MODEL_PATH}")
+        logger.info("Loading weights from %s", MODEL_PATH)
         return load_model(MODEL_PATH)
-    print("[model] No checkpoint found — using freshly initialised model (run model.py to train)")
+    logger.warning("No checkpoint found; using freshly initialized model")
     m = CrowdLSTM()
     m.eval()
     return m
@@ -367,7 +370,7 @@ async def inference_loop():
             }))
 
         except Exception as e:
-            print(f"[inference] Error: {e}")
+            logger.exception("Inference loop error: %s", e)
 
         await asyncio.sleep(10)
 
@@ -398,7 +401,7 @@ def kafka_consumer_loop():
                     redis_client.set(f"density:{zone}", round(density, 2))
 
         except Exception as e:
-            print(f"[kafka] {e} — retrying in 10s")
+            logger.warning("Kafka consumer error: %s; retrying in 10s", e)
             import time
             time.sleep(10)
 
@@ -415,7 +418,7 @@ async def startup():
     asyncio.create_task(synthetic_sensor_loop())
     asyncio.create_task(inference_loop())
     threading.Thread(target=kafka_consumer_loop, name="crowd-kafka-consumer", daemon=True).start()
-    print("[SSOS] CrowdLSTM v2 service started")
+    logger.info("Crowd prediction service started")
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
