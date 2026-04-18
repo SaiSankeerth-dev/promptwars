@@ -1,0 +1,102 @@
+version: '3.8'
+
+# ─────────────────────────────────────────────────────────────
+#  SSOS DEMO MODE — single command, no Kafka required.
+#  Services use synthetic sensor loop for real-time data.
+#
+#  Start: docker compose -f docker-compose.demo.yml up --build
+#  Dashboard: open ssos/dashboard/public/index.html in browser
+# ─────────────────────────────────────────────────────────────
+
+services:
+
+  redis:
+    image: redis:7-alpine
+    container_name: ssos-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: ssos-postgres
+    environment:
+      POSTGRES_USER: ssos
+      POSTGRES_PASSWORD: ssos_password
+      POSTGRES_DB: ssos_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ssos"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api-gateway:
+    build: ./services/api-gateway
+    container_name: ssos-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_HOST: redis
+      KAFKA_BROKERS: "localhost:9092"   # intentionally unreachable; gateway ignores Kafka
+      DATABASE_URL: postgres://ssos:ssos_password@postgres:5432/ssos_db
+      DEMO_MODE: "true"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: on-failure
+
+  crowd-prediction:
+    build: ./services/crowd-prediction
+    container_name: ssos-crowd
+    ports:
+      - "8001:8001"
+    environment:
+      REDIS_HOST: redis
+      KAFKA_BROKERS: "localhost:9092"   # Kafka consumer will retry silently
+      DEMO_MODE: "true"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: on-failure
+
+  routing-engine:
+    build: ./services/routing-engine
+    container_name: ssos-routing
+    ports:
+      - "8002:8002"
+    environment:
+      REDIS_HOST: redis
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: on-failure
+
+  decision-engine:
+    build: ./services/decision-engine
+    container_name: ssos-decision
+    ports:
+      - "8003:8003"
+    environment:
+      REDIS_HOST: redis
+      KAFKA_BROKERS: "localhost:9092"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: on-failure
+
+  digital-twin:
+    build: ./services/digital-twin
+    container_name: ssos-twin
+    ports:
+      - "8005:8005"
+    environment:
+      REDIS_HOST: redis
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: on-failure

@@ -470,6 +470,96 @@ async def receive_observation(data: dict):
     return {"status": "error", "message": "Invalid zone"}
 
 
+# ── Demo / judge interaction endpoints ───────────────────────────────────────
+
+_surge_active: Dict[str, bool] = {}
+
+@app.post("/api/v1/demo/surge")
+async def trigger_surge(data: dict):
+    """
+    Inject a sudden crowd surge into a zone for live demo purposes.
+
+    Body: { "zone": "gate_a", "target_density": 92, "velocity": 0.3 }
+
+    This instantly pushes the zone into CrushGuard DANGER territory so judges
+    can watch the full alert → response → stabilise flow live on the dashboard.
+    """
+    zone = data.get("zone", "gate_a")
+    target_density = float(data.get("target_density", 92.0))
+    velocity = float(data.get("velocity", 0.3))
+
+    if zone not in ZONES:
+        return {"error": f"Unknown zone '{zone}'", "valid_zones": ZONES[:8]}
+
+    # Push 8 identical readings to saturate the LSTM lookback window
+    for _ in range(8):
+        feature_buffer.push(zone, target_density, velocity)
+        zone_density_history[zone].append(target_density)
+        if len(zone_density_history[zone]) > 100:
+            zone_density_history[zone].pop(0)
+        zone_velocity[zone] = velocity
+
+    redis_client.set(f"density:{zone}", round(target_density, 2))
+    redis_client.set(f"velocity:{zone}", round(velocity, 3))
+    _surge_active[zone] = True
+
+    # Run inference immediately so dashboard sees the alert without waiting 10s
+    result = _infer_zone(zone)
+    redis_client.set(f"crushguard:{zone}:level", result["crush_guard"]["alert_level"])
+    redis_client.publish("crushguard_alerts", json.dumps(result["crush_guard"]))
+    redis_client.publish("dashboard:live", json.dumps({
+        "type": "PREDICTIONS",
+        "payload": [result],
+        "timestamp": datetime.utcnow().isoformat(),
+    }))
+
+    return {
+        "status": "surge_injected",
+        "zone": zone,
+        "density": target_density,
+        "crushguard": result["crush_guard"],
+    }
+
+
+@app.post("/api/v1/demo/reset")
+async def reset_surge(data: dict):
+    """Reset a surged zone back to normal density (for Before/After demo)."""
+    zone = data.get("zone", "gate_a")
+    if zone not in ZONES:
+        return {"error": f"Unknown zone '{zone}'"}
+
+    normal_density = 35.0
+
+    for _ in range(5):
+        feature_buffer.push(zone, normal_density, 1.4)
+        zone_density_history[zone].append(normal_density)
+        if len(zone_density_history[zone]) > 100:
+            zone_density_history[zone].pop(0)
+        zone_velocity[zone] = 1.4
+
+    redis_client.set(f"density:{zone}", round(normal_density, 2))
+    _surge_active.pop(zone, None)
+    result = _infer_zone(zone)
+
+    redis_client.publish("dashboard:live", json.dumps({
+        "type": "PREDICTIONS",
+        "payload": [result],
+        "timestamp": datetime.utcnow().isoformat(),
+    }))
+
+    return {"status": "reset", "zone": zone, "density": normal_density, "crushguard": result["crush_guard"]}
+
+
+@app.get("/api/v1/demo/status")
+async def demo_status():
+    """Returns current surge state for all zones — useful for demo coordination."""
+    return {
+        "active_surges": list(_surge_active.keys()),
+        "demo_mode": os.getenv("DEMO_MODE", "false"),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001)
