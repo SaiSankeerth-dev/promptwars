@@ -80,7 +80,7 @@ const StadiumMap = ({ navigation }) => {
           <Rect x="40" y="20" width="280" height="460" fill="#1f2937" rx="10" />
           
           {zones.map((zone) => {
-            const density = heatmap[zone.id] || Math.random() * 60 + 20;
+            const density = heatmap[zone.id] ?? 0;
             return (
               <G key={zone.id}>
                 <Rect 

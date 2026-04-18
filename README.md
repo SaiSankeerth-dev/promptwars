@@ -74,7 +74,7 @@ docker compose up -d
 ```bash
 pip install torch numpy
 cd services/crowd-prediction
-python model.py          # trains on synthetic data, saves crowd_lstm.pt
+python train_checkpoint.py
 ```
 
 ### 3. Open the dashboard
@@ -106,6 +106,10 @@ The `dashboard/public/index.html` standalone dashboard features:
 - **Alert Modal** — full-screen red flash + modal when danger threshold crossed
 - **System Event Log** — timestamped audit trail of all AI decisions
 - **WebSocket streaming** — live push from Redis pub/sub, graceful REST fallback
+
+Deprecated surfaces:
+- `dashboard/src/` is a legacy React prototype and not the judged demo path
+- `mobile-app/` is optional and not required for the operator demo
 
 ---
 

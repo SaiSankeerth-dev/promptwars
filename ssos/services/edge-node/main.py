@@ -1,13 +1,20 @@
 import os
 import json
 import time
-import random
+import threading
+import redis
 import numpy as np
 from datetime import datetime
 from typing import Dict, List
 from kafka import KafkaProducer
 
 app_host = os.getenv("KAFKA_BROKERS", "localhost:29092").split(",")
+
+redis_client = redis.Redis(
+    host=os.getenv("REDIS_HOST", "localhost"),
+    port=6379,
+    decode_responses=True
+)
 
 class EdgeNodeSimulator:
     def __init__(self, node_id: str, zone_ids: List[str]):
@@ -27,49 +34,71 @@ class EdgeNodeSimulator:
         except Exception as e:
             print(f"[{self.node_id}] Kafka connection failed: {e}")
             
+    def _fetch_from_redis(self, zone_id: str) -> Dict:
+        """Fetch real density/velocity from Redis crowd-prediction service."""
+        density = float(redis_client.get(f"density:{zone_id}") or 50.0)
+        velocity = float(redis_client.get(f"velocity:{zone_id}") or 1.0)
+        return density, velocity
+
     def simulate_camera_frame(self, zone_id: str) -> Dict:
-        base_people = random.randint(10, 50)
-        density = random.uniform(20, 80)
+        density, velocity = self._fetch_from_redis(zone_id)
+        person_count = int((density / 100) * 200)
         
         return {
             "node_id": self.node_id,
             "zone": zone_id,
             "timestamp": datetime.utcnow().isoformat(),
-            "frame_id": f"frame_{random.randint(1000, 9999)}",
+            "frame_id": f"frame_{int(time.time() * 1000) % 10000}",
             "detections": {
-                "person_count": base_people,
+                "person_count": person_count,
                 "density": round(density, 2),
-                "avg_velocity": round(random.uniform(0.5, 2.0), 2),
-                "motion_pattern": random.choice(["walking", "standing", "running"]),
+                "avg_velocity": round(velocity, 2),
+                "motion_pattern": "standing" if density > 70 else "walking",
             },
             "anonymized": True,
-            "processing_time_ms": random.randint(10, 50)
+            "processing_time_ms": 15
         }
         
     def simulate_iot_sensor(self, zone_id: str) -> Dict:
+        density, _ = self._fetch_from_redis(zone_id)
+        occupancy = int((density / 100) * self.zone_capacity(zone_id))
+        
         return {
             "node_id": self.node_id,
             "zone": zone_id,
             "timestamp": datetime.utcnow().isoformat(),
             "sensor_type": "people_counter",
             "readings": {
-                "entry_count": random.randint(0, 20),
-                "exit_count": random.randint(0, 20),
-                "current_occupancy": random.randint(50, 500),
-                "temperature": round(random.uniform(20, 28), 1),
-                "humidity": random.randint(40, 70)
+                "entry_count": max(0, int((density / 100) * 20)),
+                "exit_count": max(0, int((density / 100) * 10)),
+                "current_occupancy": occupancy,
+                "temperature": 22.0 + (density / 100) * 4,
+                "humidity": 55
             }
         }
+    
+    def zone_capacity(self, zone_id: str) -> int:
+        capacities = {
+            "gate_a": 3000, "gate_b": 3000, "gate_c": 3000,
+            "concourse_a": 2000, "concourse_b": 2000, "concourse_c": 1500,
+            "stand_north": 25000, "stand_south": 25000,
+            "food_court_1": 300, "food_court_2": 300,
+            "restroom_1": 100, "restroom_2": 100,
+            "exit_north": 5000, "exit_south": 5000,
+        }
+        return capacities.get(zone_id, 500)
         
     def simulate_ble_beacon(self, zone_id: str) -> Dict:
-        devices = random.randint(5, 30)
+        density, _ = self._fetch_from_redis(zone_id)
+        devices = int((density / 100) * 30)
+        
         return {
             "node_id": self.node_id,
             "zone": zone_id,
             "timestamp": datetime.utcnow().isoformat(),
             "beacon_type": "ble_anchor",
             "devices_detected": devices,
-            "avg_rssi": random.randint(-70, -50)
+            "avg_rssi": -60
         }
         
     def run(self):
@@ -115,13 +144,22 @@ class CrowdDensityModel:
     def calculate_density(self, person_count: int, zone_area_sqm: int) -> float:
         return (person_count / zone_area_sqm) * 100
         
-    def detect_anomaly(self, frame_data: Dict) -> Dict:
-        velocity = frame_data.get("detections", {}).get("avg_velocity", 0)
+    def get_density_from_redis(self, zone: str) -> float:
+        """Fetch real density from Redis crowd-prediction service."""
+        return float(redis_client.get(f"density:{zone}") or 50.0)
+    
+    def get_velocity_from_redis(self, zone: str) -> float:
+        """Fetch real velocity from Redis crowd-prediction service."""
+        return float(redis_client.get(f"velocity:{zone}") or 1.0)
+        
+    def detect_anomaly(self, frame_data: Dict, zone: str) -> Dict:
+        density = self.get_density_from_redis(zone)
+        velocity = self.get_velocity_from_redis(zone)
         
         if velocity > 3.0:
-            return {"type": "high_velocity", "severity": "medium", "details": "Unusually high movement detected"}
-        if frame_data.get("detections", {}).get("motion_pattern") == "running":
-            return {"type": "running_detected", "severity": "high", "details": "Running behavior detected"}
+            return {"type": "high_velocity", "severity": "medium", "details": "Unusually high movement detected", "density": density}
+        if density > 80:
+            return {"type": "crush_warning", "severity": "high", "details": "High density detected in zone", "density": density}
             
         return None
 
@@ -136,7 +174,7 @@ class DataAnonymizer:
         return f"anon_{hash(original_id) % 100000}"
 
 print("=" * 50)
-print("SSOS Edge Node Simulator")
+print("SSOS Edge Node - Reading Real Data from Redis")
 print("=" * 50)
 print()
 
@@ -146,12 +184,18 @@ edge_nodes = [
     EdgeNodeSimulator("edge_node_3", ["food_court_1", "food_court_2", "concourse_c"]),
 ]
 
-for node in edge_nodes:
-    try:
-        node.run()
-    except KeyboardInterrupt:
-        print(f"\n[{node.node_id}] Stopping...")
-        node.stop()
-    except Exception as e:
-        print(f"[{node.node_id}] Error: {e}")
+threads = []
+
+try:
+    for node in edge_nodes:
+        thread = threading.Thread(target=node.run, name=node.node_id, daemon=True)
+        thread.start()
+        threads.append(thread)
+
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    print("\n[edge-node] Stopping all simulators...")
+finally:
+    for node in edge_nodes:
         node.stop()

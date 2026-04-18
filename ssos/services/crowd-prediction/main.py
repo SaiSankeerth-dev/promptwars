@@ -12,6 +12,7 @@ Replaces the previous random.uniform() implementation with:
 import os
 import json
 import asyncio
+import threading
 import numpy as np
 from datetime import datetime
 from typing import Dict, List
@@ -283,17 +284,20 @@ def _trend(history: List[float]) -> str:
 
 # ─── Synthetic data loop (when no Kafka) ──────────────────────────────────────
 
-import random
+import numpy as np
+_tick_counter = 0
 
 def _event_phase_density(zone: str) -> float:
-    """Produce event-phased synthetic density for demo purposes."""
+    """Produce event-phased deterministic density for demo when no Kafka."""
+    global _tick_counter
+    _tick_counter += 1
     hour = datetime.utcnow().hour + datetime.utcnow().minute / 60.0
     base = 50.0
 
     if 17 <= hour < 18:      base = 30 + (hour - 17) * 40
     elif 18 <= hour < 19:    base = 80
     elif 19 <= hour < 19.5:  base = 70
-    elif 19.5 <= hour < 20:  base = 85   # halftime surge
+    elif 19.5 <= hour < 20:  base = 85
     elif 20 <= hour < 21.5:  base = 68
     elif 21.5 <= hour < 23:  base = 40
 
@@ -303,15 +307,17 @@ def _event_phase_density(zone: str) -> float:
         "exit_north": 1.3 if hour > 21.5 else 0.5,
     }.get(zone, 1.0)
 
-    return float(np.clip(base * zone_factor + random.gauss(0, 3), 0, 100))
+    micro_fluctuation = np.sin(_tick_counter * 0.1 + hash(zone) % 10) * 3
+    return float(np.clip(base * zone_factor + micro_fluctuation, 0, 100))
 
 
 async def synthetic_sensor_loop():
     """Simulates real edge sensor data until Kafka becomes available."""
+    global _tick_counter
     while True:
         for zone in ZONES:
             density = _event_phase_density(zone)
-            velocity = float(np.clip(2.0 - density / 70.0 + random.gauss(0, 0.1), 0.1, 2.5))
+            velocity = float(np.clip(2.0 - density / 70.0 + np.sin(_tick_counter * 0.1) * 0.1, 0.1, 2.5))
 
             # Update shared state
             zone_density_history[zone].append(density)
@@ -366,7 +372,7 @@ async def inference_loop():
         await asyncio.sleep(10)
 
 
-async def kafka_consumer_loop():
+def kafka_consumer_loop():
     """Consume real edge observations when Kafka is available."""
     while True:
         try:
@@ -393,7 +399,8 @@ async def kafka_consumer_loop():
 
         except Exception as e:
             print(f"[kafka] {e} — retrying in 10s")
-            await asyncio.sleep(10)
+            import time
+            time.sleep(10)
 
 
 # ─── Startup ──────────────────────────────────────────────────────────────────
@@ -407,7 +414,7 @@ async def startup():
         }))
     asyncio.create_task(synthetic_sensor_loop())
     asyncio.create_task(inference_loop())
-    asyncio.create_task(kafka_consumer_loop())
+    threading.Thread(target=kafka_consumer_loop, name="crowd-kafka-consumer", daemon=True).start()
     print("[SSOS] CrowdLSTM v2 service started")
 
 

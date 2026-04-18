@@ -29,15 +29,18 @@ Production-grade AI platform for 100K+ venue intelligence.
 ## Quick Start
 
 ```bash
-# Start core services
-docker-compose up -d
-
-# Run mobile app
-cd mobile-app && npm start
-
-# Start edge node simulation
-cd edge-node && python main.py
+# Demo path
+docker compose -f docker-compose.demo.yml up -d
+#
+# Canonical judged UI:
+# open dashboard/public/index.html
 ```
+
+## Demo Notes
+
+- Primary demo surface: `dashboard/public/index.html`
+- Legacy React dashboard prototype: `dashboard/src/`
+- Mobile app is optional and not required for the demo
 
 ## Core Services
 

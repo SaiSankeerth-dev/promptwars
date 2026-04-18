@@ -63,8 +63,45 @@ resource "aws_subnet" "public_subnet" {
   vpc_id            = aws_vpc.ssos_vpc.id
   cidr_block        = "10.0.10.0/24"
   availability_zone = "${var.aws_region}a"
+  map_public_ip_on_launch = true
 
   tags = merge(local.tags, { Name = "${local.project_name}-public" })
+}
+
+resource "aws_subnet" "public_subnet_2" {
+  vpc_id            = aws_vpc.ssos_vpc.id
+  cidr_block        = "10.0.11.0/24"
+  availability_zone = "${var.aws_region}b"
+  map_public_ip_on_launch = true
+
+  tags = merge(local.tags, { Name = "${local.project_name}-public-2" })
+}
+
+resource "aws_internet_gateway" "ssos_igw" {
+  vpc_id = aws_vpc.ssos_vpc.id
+
+  tags = merge(local.tags, { Name = "${local.project_name}-igw" })
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.ssos_vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.ssos_igw.id
+  }
+
+  tags = merge(local.tags, { Name = "${local.project_name}-public-rt" })
+}
+
+resource "aws_route_table_association" "public_subnet_1" {
+  subnet_id      = aws_subnet.public_subnet.id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table_association" "public_subnet_2" {
+  subnet_id      = aws_subnet.public_subnet_2.id
+  route_table_id = aws_route_table.public.id
 }
 
 resource "aws_ecs_cluster" "ssos_cluster" {
@@ -220,16 +257,27 @@ resource "aws_lb" "ssos_alb" {
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
-  subnets           = [aws_subnet.public_subnet.id]
+  subnets            = [aws_subnet.public_subnet.id, aws_subnet.public_subnet_2.id]
 
   tags = local.tags
 }
 
 resource "aws_lb_target_group" "api_gateway" {
   name     = "${local.project_name}-tg"
-  port     = 80
+  port     = 8000
   protocol = "HTTP"
   vpc_id   = aws_vpc.ssos_vpc.id
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.ssos_alb.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.api_gateway.arn
+  }
 }
 
 resource "aws_security_group" "alb" {

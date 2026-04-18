@@ -2,9 +2,12 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Set
-from datetime import datetime
+from datetime import datetime, UTC
+from urllib.parse import urlencode
+from urllib.request import urlopen
 import redis
 import redis.asyncio as aioredis
+from kafka import KafkaProducer
 import json
 import os
 import asyncio
@@ -29,6 +32,46 @@ redis_client = redis.Redis(
 )
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "localhost:29092").split(",")
+ROUTING_ENGINE_URL = os.getenv("ROUTING_ENGINE_URL", "http://localhost:8002").rstrip("/")
+CROWD_PREDICTION_URL = os.getenv("CROWD_PREDICTION_URL", "http://localhost:8001").rstrip("/")
+kafka_producer: KafkaProducer | None = None
+
+def _init_kafka_producer():
+    global kafka_producer
+    if kafka_producer is not None:
+        return
+    try:
+        kafka_producer = KafkaProducer(
+            bootstrap_servers=KAFKA_BROKERS,
+            value_serializer=lambda value: json.dumps(value).encode("utf-8"),
+        )
+        print("[gateway] Kafka producer connected")
+    except Exception as exc:
+        kafka_producer = None
+        print(f"[gateway] Kafka producer unavailable: {exc}")
+
+def _emit_event(redis_channel: str, payload: dict, kafka_topic: str | None = None):
+    message = json.dumps(payload)
+    redis_client.publish(redis_channel, message)
+    if kafka_topic and kafka_producer is not None:
+        try:
+            kafka_producer.send(kafka_topic, payload)
+        except Exception as exc:
+            print(f"[gateway] Kafka publish failed for {kafka_topic}: {exc}")
+
+def _fetch_json(url: str) -> dict:
+    with urlopen(url, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    except ValueError:
+        return None
 
 async def _redis_pubsub_broadcaster():
     """
@@ -84,6 +127,7 @@ class FoodOrder(BaseModel):
 
 @app.on_event("startup")
 async def startup():
+    _init_kafka_producer()
     asyncio.create_task(_redis_pubsub_broadcaster())
     print("[gateway] WebSocket broadcaster started")
 
@@ -126,7 +170,7 @@ async def ws_dashboard(websocket: WebSocket):
                 await websocket.send_text(json.dumps({"type": "HEARTBEAT",
                                                        "ts": datetime.utcnow().isoformat()}))
     except WebSocketDisconnect:
-        pass
+        pass  # clean disconnect - expected behavior
     finally:
         _ws_clients.discard(websocket)
 
@@ -139,6 +183,62 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "healthy", "redis": redis_client.ping()}
+
+@app.get("/api/v1/demo/health")
+async def demo_health():
+    now = datetime.now(UTC)
+    checks = {}
+
+    try:
+        checks["redis"] = {"ok": bool(redis_client.ping())}
+    except Exception as exc:
+        checks["redis"] = {"ok": False, "error": str(exc)}
+
+    updated_at_raw = redis_client.get("predictions:updated_at")
+    updated_at = _parse_iso(updated_at_raw)
+    prediction_age = (now - updated_at).total_seconds() if updated_at else None
+    checks["predictions"] = {
+        "ok": updated_at is not None and prediction_age is not None and prediction_age <= 25,
+        "updated_at": updated_at_raw,
+        "age_seconds": round(prediction_age, 2) if prediction_age is not None else None,
+        "zones": len(json.loads(redis_client.get("predictions:all") or "[]")),
+    }
+
+    twin_state_raw = redis_client.get("digital_twin:state")
+    twin_timestamp = _parse_iso(json.loads(twin_state_raw).get("timestamp")) if twin_state_raw else None
+    twin_age = (now - twin_timestamp).total_seconds() if twin_timestamp else None
+    checks["digital_twin"] = {
+        "ok": twin_timestamp is not None and twin_age is not None and twin_age <= 6,
+        "age_seconds": round(twin_age, 2) if twin_age is not None else None,
+    }
+
+    checks["decision_engine"] = {
+        "ok": redis_client.get("decision:engine:status") == "running",
+        "recent_decisions": redis_client.llen("decision:history"),
+    }
+
+    try:
+        route_probe = _fetch_json(f"{ROUTING_ENGINE_URL}/health")
+        checks["routing_engine"] = {"ok": route_probe.get("status") == "healthy"}
+    except Exception as exc:
+        checks["routing_engine"] = {"ok": False, "error": str(exc)}
+
+    try:
+        crowd_probe = _fetch_json(f"{CROWD_PREDICTION_URL}/health")
+        checks["crowd_prediction"] = {
+            "ok": crowd_probe.get("status") == "healthy",
+            "model": crowd_probe.get("model"),
+        }
+    except Exception as exc:
+        checks["crowd_prediction"] = {"ok": False, "error": str(exc)}
+
+    overall_ok = all(check["ok"] for check in checks.values())
+    return {
+        "status": "ready" if overall_ok else "degraded",
+        "checks": checks,
+        "ws_clients": len(_ws_clients),
+        "timestamp": now.isoformat(),
+    }
 
 @app.post("/api/v1/users/register")
 async def register_user(user: User):
@@ -168,13 +268,13 @@ async def update_location(location: Location):
         "y": str(location.y),
         "timestamp": location.timestamp.isoformat()
     })
-    redis_client.publish("location_updates", json.dumps({
+    _emit_event("location_updates", {
         "user_id": location.user_id,
         "zone_id": location.zone_id,
         "x": location.x,
         "y": location.y,
         "timestamp": location.timestamp.isoformat()
-    }))
+    }, kafka_topic="location_updates")
     return {"status": "updated", "user_id": location.user_id}
 
 @app.get("/api/v1/zones")
@@ -210,6 +310,23 @@ async def get_route(route_request: RouteRequest):
     redis_client.publish("routing_requests", json.dumps(route_data))
     return {"status": "route_requested", "data": route_data}
 
+@app.get("/api/v1/route/{from_zone}/{to_zone}")
+async def proxy_route(from_zone: str, to_zone: str, avoid: Optional[str] = None):
+    query = f"?{urlencode({'avoid': avoid})}" if avoid else ""
+    try:
+        return _fetch_json(f"{ROUTING_ENGINE_URL}/api/v1/route/{from_zone}/{to_zone}{query}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Routing engine unavailable: {exc}")
+
+@app.get("/api/v1/route/alternatives/{from_zone}/{to_zone}")
+async def proxy_route_alternatives(from_zone: str, to_zone: str, count: int = 3):
+    try:
+        return _fetch_json(
+            f"{ROUTING_ENGINE_URL}/api/v1/route/alternatives/{from_zone}/{to_zone}?{urlencode({'count': count})}"
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Routing engine unavailable: {exc}")
+
 @app.get("/api/v1/routing/path/{user_id}")
 async def get_user_route(user_id: str):
     route = redis_client.get(f"route:{user_id}")
@@ -236,7 +353,7 @@ async def create_food_order(order: FoodOrder):
         "created_at": datetime.utcnow().isoformat()
     }
     redis_client.hset(order_id, mapping=order_data)
-    redis_client.publish("food_orders", json.dumps({"order_id": order_id, **order_data}))
+    _emit_event("food_orders", {"order_id": order_id, **order_data}, kafka_topic="food_orders")
     return {"order_id": order_id, "status": "created"}
 
 @app.get("/api/v1/orders/{order_id}")
@@ -257,7 +374,7 @@ async def create_emergency_alert(alert: EmergencyAlert):
         "created_at": datetime.utcnow().isoformat()
     }
     redis_client.hset(alert_id, mapping=alert_data)
-    redis_client.publish("emergency_alerts", json.dumps({"alert_id": alert_id, **alert_data}))
+    _emit_event("emergency_alerts", {"alert_id": alert_id, **alert_data}, kafka_topic="emergency_alerts")
     return {"alert_id": alert_id, "status": "broadcasted"}
 
 @app.get("/api/v1/emergency/alerts")
@@ -279,6 +396,29 @@ async def get_dashboard_stats():
         "active_routes": len(active_routes),
         "timestamp": datetime.utcnow().isoformat()
     }
+
+@app.get("/api/v1/prediction/all")
+async def get_prediction_cache():
+    cached = redis_client.get("predictions:all")
+    if not cached:
+        return {"predictions": [], "source": "cache-miss", "timestamp": datetime.utcnow().isoformat()}
+    return {
+        "predictions": json.loads(cached),
+        "source": "redis-cache",
+        "updated_at": redis_client.get("predictions:updated_at"),
+    }
+
+@app.get("/api/v1/crushguard/alerts")
+async def get_crushguard_alert_cache():
+    cached = redis_client.get("crush_alerts:active")
+    alerts = json.loads(cached) if cached else []
+    return {"alerts": alerts, "count": len(alerts), "timestamp": datetime.utcnow().isoformat()}
+
+@app.get("/api/v1/decisions/recent")
+async def get_recent_decision_cache(limit: int = 20):
+    raw = redis_client.lrange("decision:history", 0, max(limit - 1, 0))
+    decisions = [json.loads(item) for item in raw]
+    return {"decisions": decisions, "count": len(decisions)}
 
 @app.post("/api/v1/staff/assign")
 async def assign_staff_task(zone_id: str, staff_id: str, task: str):

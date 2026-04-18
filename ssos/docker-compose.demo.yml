@@ -1,5 +1,3 @@
-version: '3.8'
-
 # ─────────────────────────────────────────────────────────────
 #  SSOS DEMO MODE — single command, no Kafka required.
 #  Services use synthetic sensor loop for real-time data.
@@ -43,7 +41,9 @@ services:
     environment:
       REDIS_HOST: redis
       KAFKA_BROKERS: "localhost:9092"   # intentionally unreachable; gateway ignores Kafka
-      DATABASE_URL: postgres://ssos:ssos_password@postgres:5432/ssos_db
+      DATABASE_URL: postgresql://ssos:ssos_password@postgres:5432/ssos_db
+      ROUTING_ENGINE_URL: http://routing-engine:8002
+      CROWD_PREDICTION_URL: http://crowd-prediction:8001
       DEMO_MODE: "true"
     depends_on:
       redis:

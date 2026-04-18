@@ -2,13 +2,14 @@ import os
 import json
 import time
 import asyncio
-import random
+import numpy as np
 from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from enum import Enum
 from fastapi import FastAPI
 import redis
+import redis.asyncio as aioredis
 
 app = FastAPI(title="Real-Time Decision Engine", version="1.0.0")
 
@@ -48,7 +49,7 @@ class DecisionRule:
 class RuleEngine:
     def __init__(self):
         self.rules = self._initialize_rules()
-        self.action_history = []
+        self.action_history = set()
         
     def _initialize_rules(self) -> List[DecisionRule]:
         return [
@@ -106,7 +107,8 @@ class RuleEngine:
         triggered_rules = []
         
         for rule in self.rules:
-            if rule.name in self.action_history:
+            history_key = f"{zone_id}:{rule.name}"
+            if history_key in self.action_history:
                 continue
                 
             value = metrics.get(rule.condition)
@@ -122,12 +124,13 @@ class RuleEngine:
                     "priority": rule.priority
                 })
                 
-                self.action_history.append(rule.name)
+                self.action_history.add(history_key)
                 
                 if rule.cooldown_seconds > 0:
-                    asyncio.create_task(self._reset_rule(rule.name, rule.cooldown_seconds))
+                    asyncio.create_task(self._reset_rule(history_key, rule.cooldown_seconds))
         
         if triggered_rules:
+            triggered_rules.sort(key=lambda r: (r["priority"], -r["threshold"]))
             return {
                 "zone_id": zone_id,
                 "triggered_rules": triggered_rules,
@@ -139,8 +142,7 @@ class RuleEngine:
     
     async def _reset_rule(self, rule_name: str, cooldown: int):
         await asyncio.sleep(cooldown)
-        if rule_name in self.action_history:
-            self.action_history.remove(rule_name)
+        self.action_history.discard(rule_name)
 
 class AnomalyDetector:
     def __init__(self):
@@ -219,15 +221,17 @@ class ActionExecutor:
         
         if action == ActionType.REROUTE_USERS.value:
             result["details"] = f"Routing users away from {zone_id} to less congested areas"
-            result["affected_users"] = random.randint(50, 500)
-            
+            density = float(redis_client.get(f"density:{zone_id}") or 50.0)
+            result["affected_users"] = int((density / 100) * 500)
+
         elif action == ActionType.OPEN_GATE.value:
             result["details"] = f"Opening additional gates near {zone_id}"
             result["gates_affected"] = ["gate_b", "gate_c"]
-            
+
         elif action == ActionType.ALERT_STAFF.value:
             result["details"] = f"Alerting staff to {zone_id}"
-            result["staff_notified"] = random.randint(5, 20)
+            density = float(redis_client.get(f"density:{zone_id}") or 50.0)
+            result["staff_notified"] = int((density > 70) * 15) + 5
             
         elif action == ActionType.BROADCAST_MESSAGE.value:
             result["details"] = f"Broadcasting message about congestion at {zone_id}"
@@ -281,9 +285,65 @@ class DecisionEngine:
             execution_result = await self.action_executor.execute(decision)
             decision["execution"] = execution_result
             self.decision_history.append(decision)
+            redis_client.lpush("decision:history", json.dumps(decision))
+            redis_client.ltrim("decision:history", 0, 99)
             
             redis_client.set(f"decision:latest:{zone_id}", json.dumps(decision))
             
+        return decision
+
+    async def process_crushguard_alert(self, alert: Dict) -> Optional[Dict]:
+        zone_id = alert.get("zone")
+        if not zone_id:
+            return None
+
+        alert_level = alert.get("alert_level", "safe")
+        confidence = float(alert.get("confidence", 0.0))
+        density = float(redis_client.get(f"density:{zone_id}") or 0.0)
+
+        if alert_level == "danger":
+            primary_action = ActionType.ALERT_STAFF.value
+        elif alert_level == "warning":
+            primary_action = ActionType.REROUTE_USERS.value
+        else:
+            return None
+
+        rule_driven = await self.process_zone(zone_id, {
+            "density": density,
+            "stampede_score": 0,
+            "queue_time": 0,
+        })
+        if rule_driven:
+            rule_driven["source"] = "crushguard"
+            rule_driven["alert"] = alert
+            redis_client.set(f"decision:latest:{zone_id}", json.dumps(rule_driven))
+            return rule_driven
+
+        decision = {
+            "zone_id": zone_id,
+            "triggered_rules": [{
+                "rule": "CrushGuard Alert",
+                "action": primary_action,
+                "value": confidence,
+                "threshold": 0.45 if alert_level == "warning" else 0.72,
+                "priority": 1,
+            }],
+            "primary_action": primary_action,
+            "source": "crushguard",
+            "alert": alert,
+            "metrics": {
+                "density": density,
+                "crushguard_confidence": confidence,
+            },
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        execution_result = await self.action_executor.execute(decision)
+        decision["execution"] = execution_result
+        self.decision_history.append(decision)
+        redis_client.lpush("decision:history", json.dumps(decision))
+        redis_client.ltrim("decision:history", 0, 99)
+        redis_client.set(f"decision:latest:{zone_id}", json.dumps(decision))
         return decision
     
     def get_decision_summary(self) -> Dict:
@@ -303,10 +363,36 @@ class DecisionEngine:
 
 decision_engine = DecisionEngine()
 
+async def crushguard_subscriber_loop():
+    redis_host = os.getenv("REDIS_HOST", "localhost")
+
+    while True:
+        pubsub = None
+        client = None
+        try:
+            client = aioredis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
+            pubsub = client.pubsub()
+            await pubsub.subscribe("crushguard_alerts")
+
+            async for message in pubsub.listen():
+                if message.get("type") != "message":
+                    continue
+                alert = json.loads(message["data"])
+                await decision_engine.process_crushguard_alert(alert)
+        except Exception as exc:
+            print(f"[decision-engine] crushguard subscriber error: {exc}")
+            await asyncio.sleep(5)
+        finally:
+            if pubsub is not None:
+                await pubsub.close()
+            if client is not None:
+                await client.aclose()
+
 @app.on_event("startup")
 async def startup():
     redis_client.set("decision:engine:status", "running")
     redis_client.set("decision:engine:started_at", datetime.utcnow().isoformat())
+    asyncio.create_task(crushguard_subscriber_loop())
 
 @app.get("/")
 async def root():

@@ -290,7 +290,7 @@ def save_model(model: CrowdLSTM, path: str = "crowd_lstm.pt"):
             "forecast_horizon": model.forecast_horizon,
         }
     }, path)
-    print(f"Model saved → {path}")
+    print(f"Model saved to {path}")
 
 
 def load_model(path: str = "crowd_lstm.pt") -> CrowdLSTM:

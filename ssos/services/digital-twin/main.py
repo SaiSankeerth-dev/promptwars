@@ -1,6 +1,5 @@
 import os
 import json
-import random
 import asyncio
 from datetime import datetime
 from typing import Dict, List
@@ -20,8 +19,8 @@ class StadiumAgent:
         self.id = agent_id
         self.current_zone = start_zone
         self.target_zone = None
-        self.velocity = random.uniform(0.5, 1.5)
-        self.state = "moving" if random.random() > 0.3 else "stationary"
+        self.velocity = 1.0
+        self.state = "moving"
         self.last_update = datetime.utcnow()
 
 class StadiumDigitalTwin:
@@ -47,28 +46,45 @@ class StadiumDigitalTwin:
             "exit_south": {"capacity": 800, "current_load": 0, "type": "exit"},
         }
     
+    def _get_real_density(self, zone: str) -> float:
+        """Fetch real density from Redis crowd-prediction service."""
+        return float(redis_client.get(f"density:{zone}") or 35.0)
+
+    def _get_real_velocity(self, zone: str) -> float:
+        """Fetch real velocity from Redis crowd-prediction service."""
+        return float(redis_client.get(f"velocity:{zone}") or 1.0)
+
     def spawn_agents(self, count: int):
         entry_points = ["gate_a", "gate_b", "gate_c"]
+        cycle = 0
         for i in range(count):
-            agent = StadiumAgent(f"agent_{i}", random.choice(entry_points))
+            start_zone = entry_points[i % len(entry_points)]
+            agent = StadiumAgent(f"agent_{i}", start_zone)
             self.agents[agent.id] = agent
+            self.zones[start_zone]["current_load"] += 1
+            cycle += 1
             
     def simulate_movement(self):
         for agent in self.agents.values():
             if agent.state == "moving":
-                current_load = self.zones[agent.current_zone]["current_load"]
-                capacity = self.zones[agent.current_zone]["capacity"]
+                zone = agent.current_zone
+                current_load = self.zones[zone]["current_load"]
+                capacity = self.zones[zone]["capacity"]
+                density = self._get_real_density(zone)
                 
-                if current_load > capacity * 0.8:
-                    agent.velocity *= 0.8
+                if density > 70:
+                    agent.velocity = max(0.5, agent.velocity - 0.2)
                 else:
-                    agent.velocity = min(agent.velocity * 1.1, 2.0)
-                    
-                if random.random() < 0.3:
-                    possible_zones = self._get_adjacent_zones(agent.current_zone)
-                    if possible_zones:
-                        new_zone = random.choice(possible_zones)
-                        self.zones[agent.current_zone]["current_load"] -= 1
+                    agent.velocity = min(2.0, agent.velocity + 0.1)
+                
+                density_for_zone = self._get_real_density(zone)
+                should_move = density_for_zone < 80 and capacity > current_load
+                
+                if should_move:
+                    possible_zones = self._get_adjacent_zones(zone)
+                    if possible_zones and len(possible_zones) > 0:
+                        new_zone = possible_zones[len(self.agents) % len(possible_zones)]
+                        self.zones[zone]["current_load"] -= 1
                         agent.current_zone = new_zone
                         self.zones[new_zone]["current_load"] += 1
                         

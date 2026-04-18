@@ -1,14 +1,15 @@
 import os
 import json
 import asyncio
+import threading
+import time
 from datetime import datetime
 from typing import Dict, List
 from fastapi import FastAPI
 import redis
-from kafka import KafkaConsumer, KafkaProducer
+from kafka import KafkaConsumer
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 app = FastAPI(title="Data Pipeline", version="1.0.0")
 
@@ -60,7 +61,6 @@ class EmergencyAlert(Base):
     message = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "localhost:29092").split(",")
@@ -75,8 +75,18 @@ class DataPipeline:
             "errors": 0
         }
         self.running = False
+
+    async def initialize_storage(self):
+        while True:
+            try:
+                Base.metadata.create_all(engine)
+                return
+            except Exception as e:
+                self.stats["errors"] += 1
+                print(f"[pipeline] database init failed: {e} — retrying in 5s")
+                await asyncio.sleep(5)
         
-    async def consume_crowd_observations(self):
+    def consume_crowd_observations(self):
         while self.running:
             try:
                 consumer = KafkaConsumer(
@@ -93,7 +103,7 @@ class DataPipeline:
                     try:
                         obs = CrowdObservation(
                             zone_id=data.get("zone"),
-                            density=data.get("density", 0),
+                            density=data.get("density", data.get("detections", {}).get("density", 0)),
                             timestamp=datetime.utcnow()
                         )
                         session.add(obs)
@@ -106,9 +116,11 @@ class DataPipeline:
                         session.close()
                         
             except Exception as e:
-                await asyncio.sleep(5)
+                self.stats["errors"] += 1
+                print(f"[pipeline] crowd consumer error: {e} — retrying in 5s")
+                time.sleep(5)
                 
-    async def consume_location_updates(self):
+    def consume_location_updates(self):
         while self.running:
             try:
                 consumer = KafkaConsumer(
@@ -140,9 +152,11 @@ class DataPipeline:
                         session.close()
                         
             except Exception as e:
-                await asyncio.sleep(5)
+                self.stats["errors"] += 1
+                print(f"[pipeline] location consumer error: {e} — retrying in 5s")
+                time.sleep(5)
                 
-    async def consume_food_orders(self):
+    def consume_food_orders(self):
         while self.running:
             try:
                 consumer = KafkaConsumer(
@@ -175,9 +189,11 @@ class DataPipeline:
                         session.close()
                         
             except Exception as e:
-                await asyncio.sleep(5)
+                self.stats["errors"] += 1
+                print(f"[pipeline] order consumer error: {e} — retrying in 5s")
+                time.sleep(5)
                 
-    async def consume_emergency_alerts(self):
+    def consume_emergency_alerts(self):
         while self.running:
             try:
                 consumer = KafkaConsumer(
@@ -210,14 +226,16 @@ class DataPipeline:
                         session.close()
                         
             except Exception as e:
-                await asyncio.sleep(5)
+                self.stats["errors"] += 1
+                print(f"[pipeline] alert consumer error: {e} — retrying in 5s")
+                time.sleep(5)
                 
     async def start(self):
         self.running = True
-        asyncio.create_task(self.consume_crowd_observations())
-        asyncio.create_task(self.consume_location_updates())
-        asyncio.create_task(self.consume_food_orders())
-        asyncio.create_task(self.consume_emergency_alerts())
+        threading.Thread(target=self.consume_crowd_observations, name="pipeline-crowd", daemon=True).start()
+        threading.Thread(target=self.consume_location_updates, name="pipeline-locations", daemon=True).start()
+        threading.Thread(target=self.consume_food_orders, name="pipeline-orders", daemon=True).start()
+        threading.Thread(target=self.consume_emergency_alerts, name="pipeline-alerts", daemon=True).start()
         
     def stop(self):
         self.running = False
@@ -226,6 +244,7 @@ pipeline = DataPipeline()
 
 @app.on_event("startup")
 async def startup():
+    await pipeline.initialize_storage()
     await pipeline.start()
     redis_client.set("pipeline:status", "running")
 
