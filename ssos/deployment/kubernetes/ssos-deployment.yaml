@@ -1,0 +1,280 @@
+# Kubernetes Deployment Manifests for SSOS
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ssos
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ssos-secrets
+  namespace: ssos
+type: Opaque
+stringData:
+  DATABASE_URL: postgresql://ssos:ssos_password@postgres:5432/ssos_db
+  REDIS_PASSWORD: ssos_redis_pass
+  KAFKA_BROKERS: kafka:29092
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ssos-config
+  namespace: ssos
+data:
+  REDIS_HOST: "redis"
+  KAFKA_BROKERS: "kafka:29092"
+  POSTGRES_HOST: "postgres"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: ssos
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      containers:
+      - name: api-gateway
+        image: ssos/api-gateway:latest
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - configMapRef:
+            name: ssos-config
+        - secretRef:
+            name: ssos-secrets
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crowd-prediction
+  namespace: ssos
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: crowd-prediction
+  template:
+    metadata:
+      labels:
+        app: crowd-prediction
+    spec:
+      containers:
+      - name: crowd-prediction
+        image: ssos/crowd-prediction:latest
+        ports:
+        - containerPort: 8001
+        envFrom:
+        - configMapRef:
+            name: ssos-config
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: routing-engine
+  namespace: ssos
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: routing-engine
+  template:
+    metadata:
+      labels:
+        app: routing-engine
+    spec:
+      containers:
+      - name: routing-engine
+        image: ssos/routing-engine:latest
+        ports:
+        - containerPort: 8002
+        envFrom:
+        - configMapRef:
+            name: ssos-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: decision-engine
+  namespace: ssos
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: decision-engine
+  template:
+    metadata:
+      labels:
+        app: decision-engine
+    spec:
+      containers:
+      - name: decision-engine
+        image: ssos/decision-engine:latest
+        ports:
+        - containerPort: 8003
+        envFrom:
+        - configMapRef:
+            name: ssos-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-pipeline
+  namespace: ssos
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: data-pipeline
+  template:
+    metadata:
+      labels:
+        app: data-pipeline
+    spec:
+      containers:
+      - name: data-pipeline
+        image: ssos/data-pipeline:latest
+        ports:
+        - containerPort: 8004
+        envFrom:
+        - configMapRef:
+            name: ssos-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: digital-twin
+  namespace: ssos
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: digital-twin
+  template:
+    metadata:
+      labels:
+        app: digital-twin
+    spec:
+      containers:
+      - name: digital-twin
+        image: ssos/digital-twin:latest
+        ports:
+        - containerPort: 8005
+        envFrom:
+        - configMapRef:
+            name: ssos-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: ssos
+spec:
+  type: LoadBalancer
+  selector:
+    app: api-gateway
+  ports:
+  - port: 80
+    targetPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: crowd-prediction
+  namespace: ssos
+spec:
+  selector:
+    app: crowd-prediction
+  ports:
+  - port: 8001
+    targetPort: 8001
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: routing-engine
+  namespace: ssos
+spec:
+  selector:
+    app: routing-engine
+  ports:
+  - port: 8002
+    targetPort: 8002
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: decision-engine
+  namespace: ssos
+spec:
+  selector:
+    app: decision-engine
+  ports:
+  - port: 8003
+    targetPort: 8003
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: digital-twin
+  namespace: ssos
+spec:
+  selector:
+    app: digital-twin
+  ports:
+  - port: 8005
+    targetPort: 8005
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-gateway-hpa
+  namespace: ssos
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-gateway
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70

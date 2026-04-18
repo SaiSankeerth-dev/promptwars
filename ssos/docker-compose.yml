@@ -1,0 +1,122 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+  redis:
+    image: redis:7-alpine
+    hostname: redis
+    container_name: redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+
+  postgres:
+    image: postgres:15-alpine
+    hostname: postgres
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ssos
+      POSTGRES_PASSWORD: ssos_password
+      POSTGRES_DB: ssos_db
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  api-gateway:
+    build: ./services/api-gateway
+    container_name: api-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - KAFKA_BROKERS=kafka:29092
+      - DATABASE_URL=postgres://ssos:ssos_password@postgres:5432/ssos_db
+    depends_on:
+      - redis
+      - kafka
+      - postgres
+
+  crowd-prediction:
+    build: ./services/crowd-prediction
+    container_name: crowd-prediction
+    ports:
+      - "8001:8001"
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+      - REDIS_HOST=redis
+
+  routing-engine:
+    build: ./services/routing-engine
+    container_name: routing-engine
+    ports:
+      - "8002:8002"
+    environment:
+      - REDIS_HOST=redis
+
+  decision-engine:
+    build: ./services/decision-engine
+    container_name: decision-engine
+    ports:
+      - "8003:8003"
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+      - REDIS_HOST=redis
+
+  data-pipeline:
+    build: ./services/data-pipeline
+    container_name: data-pipeline
+    ports:
+      - "8004:8004"
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+      - REDIS_HOST=redis
+      - POSTGRES_HOST=postgres
+
+  edge-node:
+    build: ./services/edge-node
+    container_name: edge-node
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+
+  digital-twin:
+    build: ./services/digital-twin
+    container_name: digital-twin
+    ports:
+      - "8005:8005"
+    environment:
+      - REDIS_HOST=redis
+
+volumes:
+  redis-data:
+  postgres-data:
